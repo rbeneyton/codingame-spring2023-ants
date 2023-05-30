@@ -71,7 +71,7 @@ pub mod main {
     // hexadecimal world
     pub const NEIGH_SIZE: usize = 6;
     // forest max tree position
-    pub const MAP_SIZE: usize = 38;
+    pub const MAP_SIZE: usize = 49; // 38;
     pub const MAP_SIZE_2: usize = MAP_SIZE * MAP_SIZE;
     // max step for neighbors
     pub const MAX_STEP: usize = 4;
@@ -107,7 +107,7 @@ pub mod main {
     pub const ENABLE_LOG : bool = true;
 
     // force echo mode
-    pub const FORCE_ECHO : bool = false;
+    pub const FORCE_ECHO : bool = true;
 
     // enable assert
     pub const ENABLE_ASSERT : bool = true;
@@ -766,7 +766,7 @@ pub mod main {
                 verbose: log_lvl(),
                 bot: true,
                 //bot_policy: Policy::Echo, // XXX
-                bot_policy: Policy::LineClosest, // XXX
+                bot_policy: Policy::LinesSmart, // XXX
                 opp_policy: Policy::Scan,
                 simulation: false,
                 learn: false,
@@ -1392,7 +1392,7 @@ pub mod main {
         // {{{ ancillary functions
 
         pub fn is_finished(&self, map : &Map) -> bool {
-            self.turn == MAX_TURN
+            self.turn == MAX_TURN + 1
             || std::cmp::max(self.pla[0].score, self.pla[1].score)
                 > map.initial_resources
         }
@@ -1485,16 +1485,19 @@ pub mod main {
         Echo,
         AlwaysWait,
         LineClosest,
+        LinesSmart,
 
         FirstCand, // always best move given my heuristic
         Scan, // simulate always until the game end, and open node smoothly
     }
 
     impl Policy {
-        const VALUES: [Self; 5] = [
+        const VALUES: [Self; 6] = [
             Self::Echo,
             Self::AlwaysWait,
             Self::LineClosest,
+            Self::LinesSmart,
+
             Self::FirstCand,
             Self::Scan
         ];
@@ -1516,6 +1519,8 @@ pub mod main {
                 Policy::Echo => write!(f, "Echo").unwrap(),
                 Policy::AlwaysWait => write!(f, "AlwaysWait").unwrap(),
                 Policy::LineClosest => write!(f, "LineClosest").unwrap(),
+                Policy::LinesSmart => write!(f, "LinesSmart").unwrap(),
+
                 Policy::FirstCand => write!(f, "FirstCand").unwrap(),
                 Policy::Scan => write!(f, "Scan").unwrap(),
             };
@@ -2772,6 +2777,69 @@ pub mod main {
         }
 
         // }}}
+        // {{{ lines_smart
+
+        fn lines_smart(&mut self, game: &Game) -> (Actions, String)
+        {
+            let mut actions = Actions::default();
+            let my_base = game.map.nb_allied as Idx;
+
+            #[derive(Debug, Copy, Clone, PartialEq)]
+            struct Cand {
+                resources: usize,
+                typ: CellType,
+                distance: Idx,
+                idx: Idx,
+                turn: Turn,
+            }
+            impl Cand {
+                pub fn heuristic(&self) -> f32 {
+                    let resources = if self.typ == CellType::Egg {
+                        std::cmp::min(10, self.resources * 10)
+                        * if self.turn < 10 { 9 } else { 3 }
+                    } else {
+                        self.resources
+                    };
+                    (resources as f32) / (3. + self.distance as f32)
+                }
+            }
+            impl PartialOrd for Cand {
+                fn partial_cmp(&self, other: &Cand) -> Option<cmp::Ordering> {
+                    other.heuristic().partial_cmp(&self.heuristic())
+                }
+            }
+
+            let turn = game.turn;
+            let mut cands : Vec<_> = (0..(game.map.nc))
+                .filter_map(|idx| {
+                    let resources = game.state.resources[idx];
+                    if resources > 0 {
+                        let distance = game.map.distance(my_base, idx);
+                        let typ = game.map.cells[idx].typ;
+                        let idx = idx as Idx;
+                        Some( Cand { resources, typ, distance, idx, turn })
+                    } else { None }
+                })
+                .collect();
+            cands.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            for (rank, target) in cands.iter().take(5).enumerate() {
+                dbg!(&target);
+                actions.append(
+                    Action::Line(my_base, target.idx, match rank {
+                        0 => 2,
+                        1 => 1,
+                        2 => 1,
+                        3 => 1,
+                        4 => 1,
+                        5 => 1,
+                        6 => 1,
+                        _ => panic!(),
+                    }));
+            }
+            (actions, format!("{} cands", cands.len()))
+        }
+
+        // }}}
         // {{{ first_cand
 
         fn first_cand(&mut self, _game: &Game) -> (Actions, String)
@@ -3167,6 +3235,8 @@ pub mod main {
                 Policy::Echo => self.echo(game),
                 Policy::AlwaysWait => self.always_wait(game),
                 Policy::LineClosest => self.line_closest(game),
+                Policy::LinesSmart => self.lines_smart(game),
+
                 Policy::FirstCand => self.first_cand(game),
                 Policy::Scan => self.scan(game),
             };
@@ -3736,6 +3806,7 @@ pub mod offline_controler {
 
                 let (mut action, msg) = self.bot.next_actions(&self.game);
                 // live debug messages (XXX leak messages)
+                if action.len() == 0 { action.append(Action::Wait); };
                 action.append(Action::build_safe_message(msg));
                 self.game.actions.append(action);
                 self.game.print_actions();
