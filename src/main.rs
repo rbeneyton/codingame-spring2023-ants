@@ -2796,7 +2796,9 @@ pub mod main {
                 pub fn heuristic(&self) -> f32 {
                     let resources = if self.typ == CellType::Egg {
                         std::cmp::min(10, self.resources * 10)
-                        * if self.turn < 10 { 9 } else { 3 }
+                        * if self.turn < 10 { 5 } else {
+                            if self.turn < 20 { 3 } else { 1 }
+                        }
                     } else {
                         self.resources
                     };
@@ -2822,11 +2824,11 @@ pub mod main {
                 })
                 .collect();
             cands.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            for (rank, target) in cands.iter().take(5).enumerate() {
+            for (rank, target) in cands.iter().take(4).enumerate() {
                 dbg!(&target);
                 actions.append(
                     Action::Line(my_base, target.idx, match rank {
-                        0 => 2,
+                        0 => 1,
                         1 => 1,
                         2 => 1,
                         3 => 1,
