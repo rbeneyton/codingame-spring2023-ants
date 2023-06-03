@@ -1254,11 +1254,14 @@ pub mod main {
                     let mut cur = self.distances[iidx];
                     let mut next = stop as Idx;
                     loop {
+                        // prioritize path with highest resources (not fully optimal)
                         next = self.cells[next.into()].neigh.iter()
                             .cloned()
                             .filter(|x| MCell::valid(*x))
                             .filter(|x| self.distances[idx(*x as usize)] == cur - 1)
-                            .next().expect("distance inconsistency");
+                            .map(|x| (x, self.cells[x as usize].initial_resources))
+                            .max_by(|a, b| a.1.cmp(&b.1))
+                            .expect("distance inconsistency").0;
                         if next == start as Idx { break; }
                         self.paths[iidx].append(next);
                         cur -= 1;
@@ -2945,7 +2948,14 @@ pub mod main {
             let mut cands = game.map.allied.iter().map(|base|
                 resources.iter().enumerate().map(move |(idx, r)| Cand {
                     resources_idx: idx,
-                    gain: r.iter().map(|x| game.state.resources[*x]).sum(),
+                    gain: r.iter()
+                        // bias to egg at start
+                        .map(|x| match game.map.cells[*x].typ {
+                            CellType::Egg if game.state.turn <= 10 => 3,
+                            CellType::Egg if game.state.turn >= 70 => 0,
+                            _ => 1,
+                        } * game.state.resources[*x])
+                        .sum(),
                     distance: r.iter().map(|x| game.map.distance(*base, *x)).min().unwrap(),
                     base : *base,
                     ..Default::default()
@@ -2956,8 +2966,8 @@ pub mod main {
                 pub fn heuristic(&self) -> f32 {
                     self.distance as f32 // closer
                     - (self.current_on_resource as f32 / 10.) // current ants on resources
-                    - (self.current as f32 / 30.)// current ants on path
-                    // - self.gain as f32 // target bigger cluster
+                    - (self.current as f32 / 10.) // current ants on path
+                    // - (self.gain as f32 / 10.) // target bigger cluster
                 }
             }
             impl PartialOrd for Cand {
@@ -3022,7 +3032,7 @@ pub mod main {
                 logln!(0, "base@{}: {:?} ({})", cand.base, cand,
                     itertools::join(resources[cand.resources_idx].iter(), ","));
                 let power = spreads - cand.spread;
-                let power = std::cmp::max(cand.gain, power);
+                // let power = cand.gain * power;
                 let mut hole_filled = false;
                 for dst in resources[cand.resources_idx].iter() {
                     graph[*dst] = std::cmp::max(graph[*dst], power);
