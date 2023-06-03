@@ -2890,7 +2890,7 @@ pub mod main {
         fn big_cluster(&mut self, game: &Game) -> (Actions, String)
         {
             let mut actions = Actions::default();
-            let _nc = game.map.nc;
+            let nc = game.map.nc;
 
             let max_dist = 1;
             // quick & dirty clustering
@@ -3005,7 +3005,8 @@ pub mod main {
             }
 
             let mut choices = Vec::<Cand>::new();
-            while choices.iter().map(|x| x.base).unique().count() != game.map.nb {
+            // while choices.iter().map(|x| x.base).unique().count() != game.map.nb {
+            while choices.len() < 4 * game.map.nb {
                 if cands.len() == 0 { break; }
                 cands.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let (_base, resources_idx) = (cands[0].base, cands[0].resources_idx);
@@ -3016,27 +3017,34 @@ pub mod main {
             // cg_assert_eq!(choice.len(), game.map.nb);
             // beacons
             let spreads : usize = choices.iter().map(|x| x.spread).sum();
+            let mut graph = Usizes::with_len(nc);
             for cand in &choices {
                 logln!(0, "base@{}: {:?} ({})", cand.base, cand,
                     itertools::join(resources[cand.resources_idx].iter(), ","));
-                let power = (spreads - cand.spread) as Score;
+                let power = spreads - cand.spread;
+                let power = std::cmp::max(cand.gain, power);
                 let mut hole_filled = false;
                 for dst in resources[cand.resources_idx].iter() {
-                    actions.append(Action::Beacon(*dst as Idx, power));
+                    graph[*dst] = std::cmp::max(graph[*dst], power);
                     // fill potential holes
                     if !hole_filled
                     && game.map.distance(cand.base, *dst) == cand.distance {
-                        for hole in game.map.path(cand.base, *dst).iter() {
-                            actions.append(Action::Beacon(*hole, power));
+                        for hole in game.map.path(cand.base, *dst).iter().map(|x| *x as usize) {
+                            graph[hole] = std::cmp::max(graph[hole], power);
                         }
                         hole_filled = true;
                     }
                 }
-                actions.append(Action::Beacon(cand.base, power));
+                graph[cand.base as usize] = std::cmp::max(graph[cand.base as usize], power);
                 // logln!(0, "actions {}", itertools::join(actions.iter(), ","));
             }
 
-            // }
+            for (idx, power) in graph.iter()
+                .enumerate()
+                .filter(|(_, x)| **x > 0)
+           {
+                actions.append(Action::Beacon(idx as Idx, *power as Score));
+           }
 
             // dbg!(&actions);
             (actions, format!("{}", MESSAGES[game.turn as usize % MESSAGES.len()]))
