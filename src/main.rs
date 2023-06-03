@@ -71,10 +71,12 @@ pub mod main {
     // hexadecimal world
     pub const NEIGH_SIZE: usize = 6;
     // forest max tree position
-    pub const MAP_SIZE: usize = 49; // 38;
+    pub const MAP_SIZE: usize = 115; // 9 * 7 + (8+7+6+5) * 2
     pub const MAP_SIZE_2: usize = MAP_SIZE * MAP_SIZE;
+    pub const MAX_PATH: usize = 32;
     // max step for neighbors
     pub const MAX_STEP: usize = 4;
+    pub const MAX_BASE: usize = 4;
 
     pub const MAX_ACTIONS: usize = 64;
         // (256 - size_of::<usize>()) / size_of::<Action>(); // 82
@@ -107,7 +109,7 @@ pub mod main {
     pub const ENABLE_LOG : bool = true;
 
     // force echo mode
-    pub const FORCE_ECHO : bool = true;
+    pub const FORCE_ECHO : bool = false;
 
     // enable assert
     pub const ENABLE_ASSERT : bool = true;
@@ -766,7 +768,7 @@ pub mod main {
                 verbose: log_lvl(),
                 bot: true,
                 //bot_policy: Policy::Echo, // XXX
-                bot_policy: Policy::LinesSmart, // XXX
+                bot_policy: Policy::BigCluster, // XXX
                 opp_policy: Policy::Scan,
                 simulation: false,
                 learn: false,
@@ -881,34 +883,34 @@ pub mod main {
     // struct to pack bit and maintain count
     #[derive(Default, Eq, PartialEq, Debug, Clone, Copy, Hash)]
     pub struct IdxMask {
-        pub data : u64,
+        pub data : u128,
     }
 
     // Index & IndexMut not possible here with their API by reference /o\
 
     impl IdxMask {
         pub const MAX : Idx = MAP_SIZE as Idx;
-        pub const DATA_MASK : u64 = (1u64 << MAP_SIZE) - 1;
-        pub const COUNT_OFFSET : Score = 64 - 8;
-        pub const DIRTY : u64 = (1u64 << (64 - 16)); // means count is not up-to-date
+        pub const DATA_MASK : u128 = (1u128 << MAP_SIZE) - 1;
+        pub const COUNT_OFFSET : Score = 128 - 8;
+        pub const DIRTY : u128 = (1u128 << (128 - 16)); // means count is not up-to-date
 
-        pub fn new(data : u64) -> Self{
+        pub fn new(data : u128) -> Self{
             Self {
                 data,
             }
         }
         // XXX add/remove/... does not update count!
         pub fn add(&mut self, idx: Idx) {
-            self.data |= 1u64 << idx;
+            self.data |= 1u128 << idx;
         }
         pub fn remove(&mut self, idx: Idx) {
-            self.data &= !(1u64 << idx);
+            self.data &= !(1u128 << idx);
         }
         pub fn get(&self, idx: Idx) -> bool {
-            (self.data & 1u64 << idx) != 0
+            (self.data & 1u128 << idx) != 0
         }
         pub fn set_count(&mut self, count: Idx) {
-            self.data |= (count as u64) << Self::COUNT_OFFSET;
+            self.data |= (count as u128) << Self::COUNT_OFFSET;
         }
         pub fn dirty(&self) -> bool {
             (self.data & Self::DIRTY) != 0
@@ -956,7 +958,7 @@ pub mod main {
     // {{{ Iterator
 
     pub struct IterIdxMask {
-        data: u64, // full copy
+        data: u128, // full copy
         idx: Idx,
     }
     impl Iterator for IterIdxMask {
@@ -968,7 +970,7 @@ pub mod main {
                 if self.idx == IdxMask::MAX {
                     return None;
                 }
-                if (self.data & 1u64 << self.idx) != 0 {
+                if (self.data & 1u128 << self.idx) != 0 {
                     return Some(self.idx);
                 }
             }
@@ -1032,14 +1034,17 @@ pub mod main {
     pub type Cells = FixedArray::<MCell, MAP_SIZE>;
     pub type IdxMasks = FixedArray::<IdxMask, MAP_SIZE>;
     pub type Distances = FixedArray::<u8, MAP_SIZE_2>;
+    pub type Path = FixedArray::<u8, MAX_PATH>;
+    pub type Paths = FixedArray::<Path, MAP_SIZE_2>;
+    pub type Idxs = FixedArray::<Idx, MAX_BASE>;
 
     #[derive(Default, Eq, PartialEq, Debug, Clone, Copy)]
     pub struct Map {
         pub nc : usize, // numberOfCells
         pub cells : Cells,
         pub nb : usize, // numberOfBases
-        pub nb_allied : Idx, // numberOfBases Allied
-        pub nb_opp : Idx, // numberOfBases Opponent
+        pub allied : Idxs, // Allied bases
+        pub opp : Idxs, // Opponent bases
 
         // computed
         pub initial_resources : Score,
@@ -1054,6 +1059,7 @@ pub mod main {
 
         // distance matrix
         pub distances : Distances,
+        pub paths : Paths,
 
         // ressources > 0 cells
         pub resources : IdxMask,
@@ -1088,10 +1094,16 @@ pub mod main {
             cg_assert!(lines.len() >= lineno + 3);
             self.nb = lines[lineno].parse::<usize>().unwrap();
             lineno += 1;
-            cg_assert_eq!(self.nb, 1);
-            self.nb_allied = lines[lineno].parse::<Idx>().unwrap();
+            cg_assert!(self.nb < MAX_BASE);
+            for tok in lines[lineno].split(' ') {
+                self.allied.append(tok.parse::<Idx>().unwrap());
+            }
+            cg_assert_eq!(self.allied.len(), self.nb);
             lineno += 1;
-            self.nb_opp = lines[lineno].parse::<Idx>().unwrap();
+            for tok in lines[lineno].split(' ') {
+                self.opp.append(tok.parse::<Idx>().unwrap());
+            }
+            cg_assert_eq!(self.opp.len(), self.nb);
             // lineno += 1;
 
             // }}}
@@ -1183,11 +1195,19 @@ pub mod main {
             self.distances[idx(start, stop)]
         }
 
+        fn path(&self, start : impl Into<usize>, stop : impl Into<usize>) -> Path {
+            let nc = self.nc;
+            let start : usize = start.into();
+            let stop : usize = stop.into();
+            let idx = |a, b| a * nc + b;
+            self.paths[idx(start, stop)]
+        }
         // {{{ compute_distances
 
-        fn compute_distances(&mut self) {
+        fn compute_distances_and_path(&mut self) {
             let nc = self.nc;
             self.distances.set_len(nc * nc);
+            self.paths.set_len(nc * nc);
             // let idx = |a, b| a * nc + b;
             let mut cells = HashSet::with_capacity(nc);
             let mut next_cells = HashSet::with_capacity(nc);
@@ -1226,12 +1246,32 @@ pub mod main {
                     std::mem::swap(&mut cells, &mut next_cells);
                 }
             }
+            // quick & dirty back prop to get paths
+            for start in 0..nc {
+                let idx = |b| start * nc + b;
+                for stop in (0..nc).filter(|x| *x != start) {
+                    let iidx = idx(stop);
+                    let mut cur = self.distances[iidx];
+                    let mut next = stop as Idx;
+                    loop {
+                        next = self.cells[next.into()].neigh.iter()
+                            .cloned()
+                            .filter(|x| MCell::valid(*x))
+                            .filter(|x| self.distances[idx(*x as usize)] == cur - 1)
+                            .next().expect("distance inconsistency");
+                        if next == start as Idx { break; }
+                        self.paths[iidx].append(next);
+                        cur -= 1;
+                    }
+                    logln!(99, "from {} to {}: {}", start, stop, itertools::join(self.paths[iidx].iter(), ","));
+                }
+            }
         }
 
         // }}}
 
         pub fn post_init(&mut self) {
-            self.compute_distances();
+            self.compute_distances_and_path();
         }
 
         // }}}
@@ -1246,8 +1286,8 @@ pub mod main {
                 write!(f, "{}: {} ", idx, self.cells[idx]).unwrap();
             }
             write!(f, "nb:{} ", self.nb).unwrap();
-            write!(f, "nb:{} ", self.nb_allied).unwrap();
-            write!(f, "nb:{} ", self.nb_opp).unwrap();
+            write!(f, "allied:{} ", itertools::join(self.allied.iter(), ",")).unwrap();
+            write!(f, "opp:{} ", itertools::join(self.opp.iter(), ",")).unwrap();
             Ok(())
         }
     }
@@ -1352,7 +1392,7 @@ pub mod main {
     pub struct State {
         pub turn: Turn, // locally computed
         pub pla: [Player; 2],
-        pub resources: Usizes,
+        pub resources: Usizes, // resource > 0 only
     }
 
     // }}}
@@ -1451,7 +1491,7 @@ pub mod main {
         // }}}
         // {{{ evaluate
 
-        pub fn evaluate(&self) -> [f32; 2]
+        pub fn evaluate(&self, _map: &Map) -> [f32; 2]
         {
             // XXX the result would be compared to the final score for terminal leaves, so don't
             // mess up and diverge a lot from the score!
@@ -1486,17 +1526,19 @@ pub mod main {
         AlwaysWait,
         LineClosest,
         LinesSmart,
+        BigCluster,
 
         FirstCand, // always best move given my heuristic
         Scan, // simulate always until the game end, and open node smoothly
     }
 
     impl Policy {
-        const VALUES: [Self; 6] = [
+        const VALUES: [Self; 7] = [
             Self::Echo,
             Self::AlwaysWait,
             Self::LineClosest,
             Self::LinesSmart,
+            Self::BigCluster,
 
             Self::FirstCand,
             Self::Scan
@@ -1520,6 +1562,7 @@ pub mod main {
                 Policy::AlwaysWait => write!(f, "AlwaysWait").unwrap(),
                 Policy::LineClosest => write!(f, "LineClosest").unwrap(),
                 Policy::LinesSmart => write!(f, "LinesSmart").unwrap(),
+                Policy::BigCluster => write!(f, "BigCluster").unwrap(),
 
                 Policy::FirstCand => write!(f, "FirstCand").unwrap(),
                 Policy::Scan => write!(f, "Scan").unwrap(),
@@ -2745,7 +2788,7 @@ pub mod main {
         fn line_closest(&mut self, game: &Game) -> (Actions, String)
         {
             let mut actions = Actions::default();
-            let my_base = game.map.nb_allied as Idx;
+            let my_base = game.map.allied[0] as Idx;
 
             // for d in 0..3 {
             //     eprintln!("at {}: {}", d, itertools::join(
@@ -2782,7 +2825,7 @@ pub mod main {
         fn lines_smart(&mut self, game: &Game) -> (Actions, String)
         {
             let mut actions = Actions::default();
-            let my_base = game.map.nb_allied as Idx;
+            let my_base = game.map.allied[0] as Idx;
 
             #[derive(Debug, Copy, Clone, PartialEq)]
             struct Cand {
@@ -2839,6 +2882,164 @@ pub mod main {
                     }));
             }
             (actions, format!("{} cands", cands.len()))
+        }
+
+        // }}}
+        // {{{ big_cluster
+
+        fn big_cluster(&mut self, game: &Game) -> (Actions, String)
+        {
+            let mut actions = Actions::default();
+            let _nc = game.map.nc;
+
+            let max_dist = 1;
+            // quick & dirty clustering
+            let mut resources = game.state.resources.iter()
+                .enumerate()
+                .filter(|(_, x)| **x > 0) // real resources
+                .map(|(idx, _)| vec![idx])
+                .collect::<Vec<_>>();
+            loop {
+                let swap = 'scan: loop {
+                    for froms in resources.iter().enumerate() {
+                        for tos in resources.iter().enumerate() {
+                            if tos.0 <= froms.0 { continue; } // upper diag
+                            for from in froms.1 {
+                                for to in tos.1 {
+                                    if game.map.distance(*from, *to) <= max_dist {
+                                        break 'scan Some((froms.0, tos.0, *from, *to));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break None;
+                };
+                logln!(50, "{}", itertools::join(resources.iter()
+                    .map(|x| itertools::join(x.iter(), ","))
+                    , " "));
+                match swap {
+                    Some((froms, tos, from, to)) => {
+                        logln!(90, "{}({}) <= {}({})", froms, from, tos, to);
+                        resources[froms].push(to);
+                        resources[tos].retain(|x| *x != to);
+                        resources.retain(|x| x.len() > 0);
+                    },
+                    None => {
+                        break;
+                    },
+                }
+            }
+
+            #[derive(Debug, Copy, Clone, PartialEq, Default)]
+            struct Cand {
+                resources_idx: usize,
+                gain: usize,
+                distance: Idx,
+                base: Idx,
+                spread: usize, // number of beacon projected, for normalization
+                current: usize, // number of current ants on this target
+                current_on_resource: usize, // number of current ants on this target
+            }
+
+            let mut cands = game.map.allied.iter().map(|base|
+                resources.iter().enumerate().map(move |(idx, r)| Cand {
+                    resources_idx: idx,
+                    gain: r.iter().map(|x| game.state.resources[*x]).sum(),
+                    distance: r.iter().map(|x| game.map.distance(*base, *x)).min().unwrap(),
+                    base : *base,
+                    ..Default::default()
+                }))
+                .flatten()
+                .collect::<Vec<_>>();
+            impl Cand {
+                pub fn heuristic(&self) -> f32 {
+                    self.distance as f32 // closer
+                    - (self.current_on_resource as f32 / 10.) // current ants on resources
+                    - (self.current as f32 / 30.)// current ants on path
+                    // - self.gain as f32 // target bigger cluster
+                }
+            }
+            impl PartialOrd for Cand {
+                fn partial_cmp(&self, other: &Cand) -> Option<cmp::Ordering> {
+                    self.heuristic().partial_cmp(&other.heuristic())
+                }
+            }
+            // associate closer cluster to their base
+
+            // cand normalization + compute heuristic
+            let mut cells = HashSet::new();
+            let cells_resources = game.state.resources.iter()
+                .enumerate()
+                .filter(|(_, x)| **x > 0)
+                .map(|(x, _)| x)
+                .collect::<HashSet<_>>();
+
+            for cand in cands.iter_mut() {
+                cells.clear();
+                cells.extend(resources[cand.resources_idx].iter());
+                for dst in resources[cand.resources_idx].iter() {
+                    // fill potential holes
+                    if game.map.distance(cand.base, *dst) == cand.distance {
+                        cells.extend(game.map.path(cand.base, *dst).iter().map(|x| *x as usize));
+                        break;
+                    }
+                }
+                // compute proxy of moves to reach that situation
+                cand.current = game.state.pla[0].ants.iter()
+                    .enumerate()
+                    .filter(|(_, x)| **x > 0)
+                    .filter(|(x, _)| cells.contains(&x))
+                    .map(|(_, x)| *x)
+                    .sum();
+                cand.current_on_resource = game.state.pla[0].ants.iter()
+                    .enumerate()
+                    .filter(|(_, x)| **x > 0)
+                    .filter(|(x, _)| cells.contains(&x))
+                    .filter(|(x, _)| cells_resources.contains(&x))
+                    .map(|(_, x)| *x)
+                    .sum();
+                // then base
+                cells.insert(cand.base as usize);
+                cand.spread = cells.len();
+            }
+
+            let mut choices = Vec::<Cand>::new();
+            while choices.iter().map(|x| x.base).unique().count() != game.map.nb {
+                if cands.len() == 0 { break; }
+                cands.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let (_base, resources_idx) = (cands[0].base, cands[0].resources_idx);
+                choices.push(cands[0]);
+                // cands.retain(|x| x.base != base);
+                cands.retain(|x| x.resources_idx != resources_idx);
+            }
+            // cg_assert_eq!(choice.len(), game.map.nb);
+            // beacons
+            let spreads : usize = choices.iter().map(|x| x.spread).sum();
+            for cand in &choices {
+                logln!(0, "base@{}: {:?} ({})", cand.base, cand,
+                    itertools::join(resources[cand.resources_idx].iter(), ","));
+                let power = (spreads - cand.spread) as Score;
+                let mut hole_filled = false;
+                for dst in resources[cand.resources_idx].iter() {
+                    actions.append(Action::Beacon(*dst as Idx, power));
+                    // fill potential holes
+                    if !hole_filled
+                    && game.map.distance(cand.base, *dst) == cand.distance {
+                        for hole in game.map.path(cand.base, *dst).iter() {
+                            actions.append(Action::Beacon(*hole, power));
+                        }
+                        hole_filled = true;
+                    }
+                }
+                actions.append(Action::Beacon(cand.base, power));
+                // logln!(0, "actions {}", itertools::join(actions.iter(), ","));
+            }
+
+            // }
+
+            // dbg!(&actions);
+            (actions, format!("{}", MESSAGES[game.turn as usize % MESSAGES.len()]))
         }
 
         // }}}
@@ -3238,6 +3439,7 @@ pub mod main {
                 Policy::AlwaysWait => self.always_wait(game),
                 Policy::LineClosest => self.line_closest(game),
                 Policy::LinesSmart => self.lines_smart(game),
+                Policy::BigCluster => self.big_cluster(game),
 
                 Policy::FirstCand => self.first_cand(game),
                 Policy::Scan => self.scan(game),
@@ -3800,6 +4002,8 @@ pub mod offline_controler {
 
             // main codingame "live" loop
             loop {
+                /*GDB let (mut action, msg) = self.bot.next_actions(&self.game);*/
+
                 let (time, lines) = self.game.update_apply_step();
                 self.bot.step_start_time = Some(time);
                 if self.game.state.is_finished(&self.game.map) {
