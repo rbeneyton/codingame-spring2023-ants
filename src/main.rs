@@ -62,7 +62,7 @@ pub mod main {
     pub const INVALID_IDX: Idx = Idx::MAX;
 
     // estimated score constant
-    pub type Score = u16;
+    pub type Score = u32;
 
     pub const MAX_STARTUP_DURATION : u128 = 900_000; // 1000ms with a security
 
@@ -3034,6 +3034,7 @@ pub mod main {
         {
             let mut actions = Actions::default();
             let nc = game.map.nc;
+            let nb = game.map.nb;
 
             // {{{ build resources (cluster of stuff)
 
@@ -3167,12 +3168,13 @@ pub mod main {
             }
 
             let mut choices = Vec::<Cand>::new();
-            while choices.iter().map(|x| x.base).unique().count() != game.map.nb
-            || choices.len() < match game.map.nb { 1 => 3, 2 => 4, _ => panic!(), } {
+            while choices.iter().map(|x| x.base).unique().count() != nb
+            || choices.len() < match nb { 1 => 3, 2 => 4, _ => panic!(), } {
                 if cands.len() == 0 { break; }
                 cands.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let (_base, resources_idx) = (cands[0].base, cands[0].resources_idx);
                 choices.push(cands.swap_remove(0));
+                if cands.is_empty() { break; }
                 // cands.retain(|x| x.base != base);
                 // cands.retain(|x| x.resources_idx != resources_idx);
             }
