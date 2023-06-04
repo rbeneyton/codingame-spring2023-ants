@@ -62,7 +62,7 @@ pub mod main {
     pub const INVALID_IDX: Idx = Idx::MAX;
 
     // estimated score constant
-    pub type Score = u16;
+    pub type Score = u32;
 
     pub const MAX_STARTUP_DURATION : u128 = 900_000; // 1000ms with a security
 
@@ -3034,6 +3034,7 @@ pub mod main {
         {
             let mut actions = Actions::default();
             let nc = game.map.nc;
+            let nb = game.map.nb;
 
             // {{{ build resources (cluster of stuff)
 
@@ -3167,12 +3168,12 @@ pub mod main {
             }
 
             let mut choices = Vec::<Cand>::new();
-            while choices.iter().map(|x| x.base).unique().count() != game.map.nb
-            || choices.len() < match game.map.nb { 1 => 3, 2 => 4, _ => panic!(), } {
+            while choices.iter().map(|x| x.base).unique().count() != nb
+            || choices.len() < match nb { 1 => 3, 2 => 4, _ => panic!(), } {
                 if cands.len() == 0 { break; }
                 cands.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let (_base, resources_idx) = (cands[0].base, cands[0].resources_idx);
                 choices.push(cands.swap_remove(0));
+                // let (base, resources_idx) = (cands[0].base, cands[0].resources_idx);
                 // cands.retain(|x| x.base != base);
                 // cands.retain(|x| x.resources_idx != resources_idx);
             }
@@ -3181,28 +3182,37 @@ pub mod main {
             // {{{ build final graph of beacons
 
             // beacons
-            let spreads : usize = choices.iter().map(|x| x.spread).sum();
-            let mut graph = Usizes::with_len(nc);
+            let spreads_n = (0..nb)
+                .map(|b| choices.iter().filter(|x| x.base_idx == b).count() as f32)
+                .collect::<Vec<_>>();
+            let gains_n = (0..nb)
+                .map(|b| choices.iter().filter(|x| x.base_idx == b).map(|x| x.gain).sum::<usize>() as f32)
+                .collect::<Vec<_>>();
+
+            type Powers = FixedArray::<f32, MAP_SIZE>;
+            let mut graph = Powers::with_len(nc);
             for cand in &choices {
                 logln!(10, "base@{}: {:?} ({})", cand.base, cand,
                     itertools::join(resources[cand.resources_idx].iter(), ","));
-                let power = 1 + spreads - cand.spread;
-                // let power = cand.gain * power;
+                let mut power = 1. / cand.spread as f32; // normalization for this cand
+                power /= spreads_n[cand.base_idx] as f32; // normalization for this base
+                // power *= cand.gain as f32 / gains_n[cand.base_idx];
+                // power *= bonus?
                 let mut hole_filled = false;
                 for dst in resources[cand.resources_idx].iter() {
-                    graph[*dst] = std::cmp::max(graph[*dst], power);
+                    graph[*dst] = graph[*dst].max(power);
                     // fill potential holes
                     if !hole_filled
                     && game.map.distance(cand.base, *dst) == cand.distance {
                         logln!(10, "adding {}->{}: {}", cand.base, *dst,
                             itertools::join(game.state.path_from_base(cand.base_idx, *dst, &game.map).iter(), ","));
                         for hole in game.state.path_from_base(cand.base_idx, *dst, &game.map).iter().map(|x| *x as usize) {
-                            graph[hole] = std::cmp::max(graph[hole], power);
+                            graph[hole] = graph[hole].max(power);
                         }
                         hole_filled = true;
                     }
                 }
-                graph[cand.base as usize] = std::cmp::max(graph[cand.base as usize], power);
+                graph[cand.base as usize] = graph[cand.base as usize].max(power);
                 // logln!(0, "actions {}", itertools::join(actions.iter(), ","));
             }
 
@@ -3210,20 +3220,18 @@ pub mod main {
 
             logln!(10, "graph: {}",
                 itertools::join(graph.iter().enumerate().map(|(idx, x)| format!("{}({})", idx, x)), ","));
-            for (idx, power) in graph.iter()
-                .enumerate()
-                .filter(|(_, x)| **x > 0)
+            for (idx, power) in graph.iter().enumerate().filter(|(_, x)| **x > 0.)
            {
-                let mut power = *power as Score;
+                let mut power = *power;
                 // detect chain brak by opp
                 if game.state.pla[0].ants[idx] > 0
                 && game.state.pla[1].ants[idx] > game.state.pla[0].ants[idx] {
                     logln!(1, "extra power for {}: {}>{}",
                         idx, game.state.pla[1].ants[idx], game.state.pla[0].ants[idx]);
-                    power += 3;
+                    power += 0.05;
                 }
 
-                actions.append(Action::Beacon(idx as Idx, power));
+                actions.append(Action::Beacon(idx as Idx, (power * 500.).ceil() as Score));
            }
 
             // dbg!(&actions);
