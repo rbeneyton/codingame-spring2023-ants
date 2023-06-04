@@ -71,12 +71,13 @@ pub mod main {
     // hexadecimal world
     pub const NEIGH_SIZE: usize = 6;
     // forest max tree position
-    pub const MAP_SIZE: usize = 115; // 9 * 7 + (8+7+6+5) * 2
+    pub const MAP_SIZE: usize = 100; // 9 * 7 + (8+7+6+5) * 2
     pub const MAP_SIZE_2: usize = MAP_SIZE * MAP_SIZE;
-    pub const MAX_PATH: usize = 40;
+    pub const MAX_PATH: usize = 32;
     // max step for neighbors
     pub const MAX_STEP: usize = 4;
-    pub const MAX_BASE: usize = 4;
+    pub const MAX_BASE: usize = 2;
+    pub const MAP_SIZE_BASE: usize = MAP_SIZE * MAX_BASE;
 
     pub const MAX_ACTIONS: usize = 64;
         // (256 - size_of::<usize>()) / size_of::<Action>(); // 82
@@ -1036,6 +1037,7 @@ pub mod main {
     pub type Distances = FixedArray::<u8, MAP_SIZE_2>;
     pub type Path = FixedArray::<u8, MAX_PATH>;
     pub type Paths = FixedArray::<Path, MAP_SIZE_2>;
+    pub type PathsBases = FixedArray::<Path, MAP_SIZE_BASE>;
     pub type Idxs = FixedArray::<Idx, MAX_BASE>;
 
     #[derive(Default, Eq, PartialEq, Debug, Clone, Copy)]
@@ -1117,7 +1119,7 @@ pub mod main {
             cg_assert!(lines.len() >= lineno + 3);
             self.nb = lines[lineno].parse::<usize>().unwrap();
             lineno += 1;
-            cg_assert!(self.nb < MAX_BASE);
+            cg_assert!(self.nb <= MAX_BASE);
             for tok in lines[lineno].split(' ') {
                 self.allied.append(tok.parse::<Idx>().unwrap());
             }
@@ -1211,7 +1213,7 @@ pub mod main {
         }
 
         /// }}}
-        // {{{ compute_distances
+        // {{{ compute_distances_and_path
 
         fn compute_distances_and_path(&mut self) {
             let nc = self.nc;
@@ -1400,7 +1402,8 @@ pub mod main {
         pub pla: [Player; 2],
         pub resources: Usizes, // resource > 0 only
         // extra: live paths
-        pub paths : Paths,
+        pub paths : PathsBases,
+        pub paths_from_bases : PathsBases,
     }
 
     // }}}
@@ -1426,8 +1429,12 @@ pub mod main {
             // format: numberOfCells lines: "resources myAnts oppAnts"
             let nc = map.nc;
 
+            let line : Vec<&str> = lines[0].split(' ').collect();
+            self.pla[0].score = line[0].parse::<Score>().unwrap();
+            self.pla[1].score = line[1].parse::<Score>().unwrap();
+
             for idx in 0..nc {
-                let line : Vec<&str> = lines[idx].split(' ').collect();
+                let line : Vec<&str> = lines[1 + idx].split(' ').collect();
                 cg_assert_eq!(line.len(), 3);
                 self.resources[idx] = line[0].parse::<usize>().unwrap();
                 self.pla[0].ants[idx] = line[1].parse::<usize>().unwrap();
@@ -1435,6 +1442,7 @@ pub mod main {
             }
 
             self.compute_live_paths(map);
+            self.compute_live_paths2(map);
 
             self.turn += 1;
         }
@@ -1466,22 +1474,25 @@ pub mod main {
 
         fn compute_live_paths(&mut self, map : &Map) {
             let nc = map.nc;
-            self.paths.set_len(nc * nc);
+            let nb = map.nb;
+            self.paths.set_len(nc * nb);
             // quick & dirty back prop to get paths
-            for start in 0..nc {
-                let idx = |b| start * nc + b;
+            for (start_idx, start) in map.allied.iter().enumerate().map(|(idx, x)| (idx, *x as usize)) {
+                let distance_idx = |b| start * nc + b;
+                let path_idx = |b| start_idx * nc + b;
                 for stop in (0..nc).filter(|x| *x != start) {
-                    let iidx = idx(stop);
-                    let mut cur = map.distances[iidx];
+                    let didx = distance_idx(stop);
+                    let pidx = path_idx(stop);
+                    let mut cur = map.distances[didx];
                     let mut next = stop as Idx;
-                    self.paths[iidx].set_len(0); // reset previous path
+                    self.paths[pidx].set_len(0); // reset previous path
                     loop {
                         // exit condition
                         if map.cells[next.into()].neigh.iter().any(|x| *x == (start as Idx)) { break; }
                         next = map.cells[next.into()].neigh.iter()
                             .cloned()
                             .filter(|x| MCell::valid(*x))
-                            .filter(|x| map.distances[idx(*x as usize)] == cur - 1)
+                            .filter(|x| map.distances[distance_idx(*x as usize)] == cur - 1)
                             .map(|x| (x, self.resources[x as usize],
                                 self.pla[1].ants[x as usize], self.pla[0].ants[x as usize]))
                             // prioritize path with highest current resources
@@ -1491,20 +1502,95 @@ pub mod main {
                                 .then_with(|| a.3.cmp(&b.3))
                                 .then_with(|| b.2.cmp(&a.2)))
                             .expect("distance inconsistency").0;
-                        self.paths[iidx].append(next);
+                        self.paths[pidx].append(next);
                         cur -= 1;
                     }
-                    logln!(99, "from {} to {}: {}", start, stop, itertools::join(self.paths[iidx].iter(), ","));
+                    logln!(99, "from {} to {}: {}", start, stop, itertools::join(self.paths[pidx].iter(), ","));
                 }
             }
         }
 
-        fn path(&self, start : impl Into<usize>, stop : impl Into<usize>, map : &Map) -> Path {
+        fn compute_live_paths2(&mut self, map : &Map) {
             let nc = map.nc;
-            let start : usize = start.into();
-            let stop : usize = stop.into();
+            let nb = map.nb;
+            self.paths_from_bases.set_len(nc * nb);
+            // only from bases
+            for (start_idx, start) in map.allied.iter().enumerate().map(|(idx, x)| (idx, *x as usize)) {
+                let distance_idx = |b| start * nc + b;
+                let path_idx = |b| start_idx * nc + b;
+                for stop in (0..nc).filter(|x| *x != start) {
+                    let didx = distance_idx(stop);
+                    let pidx = path_idx(stop);
+                    let mut cur = map.distances[didx];
+                    self.paths_from_bases[pidx].set_len(0); // reset previous path
+
+                    // seed
+                    let mut paths = Vec::new();
+                    let mut next_paths = Vec::new();
+                    paths.push(Path::default());
+                    paths[0].append(stop as Idx);
+
+                    'bfs: loop {
+                        let first = paths.len() == 1 && paths[0].len() == 1 && paths[0][0] == stop as Idx;
+                        next_paths.clear();
+                        for path in &paths {
+                            let pos = path.last() as usize;
+                            // exit condition
+                            if map.cells[pos].neigh.iter().any(|x| *x == (start as Idx)) { break 'bfs; }
+
+                            for next in map.cells[pos].neigh.iter()
+                                .cloned()
+                                .filter(|x| MCell::valid(*x))
+                                .filter(|x| map.distances[distance_idx(*x as usize)] == cur - 1)
+                            {
+                                // remove 'stop' position now
+                                next_paths.push(if first { Path::default() } else { *path });
+                                next_paths.last_mut().unwrap().append(next);
+                            }
+                        }
+                        cur -= 1;
+                        std::mem::swap(&mut paths, &mut next_paths);
+                    }
+                    logln!(40, "from {} to {}: compute {} paths, first:{}",
+                        start, stop, paths.len(), itertools::join(paths[0].iter(), ","));
+                    self.paths_from_bases[pidx] = paths.iter()
+                        .map(|p| (*p,
+                            p.iter().map(|x| self.resources[*x as usize]).sum::<usize>(),
+                            p.iter().map(|x| self.pla[1].ants[*x as usize]).sum::<usize>(),
+                            p.iter().map(|x| self.pla[0].ants[*x as usize]).sum::<usize>()))
+                        // prioritize path with highest current resources
+                        // then my own ants
+                        // then lowest opp (not fully optimal)
+                        .max_by(|a, b| a.1.cmp(&b.1)
+                            .then_with(|| a.3.cmp(&b.3))
+                            .then_with(|| b.2.cmp(&a.2)))
+                        .expect("distance inconsistency").0;
+                    logln!(60, "from {} to {}: compute {} paths, best:{}",
+                        start, stop, paths.len(), itertools::join(self.paths_from_bases[pidx].iter(), ","));
+                }
+            }
+        }
+
+        fn path(&self, base_idx : impl Into<usize>, to : impl Into<usize>, map : &Map) -> Path {
+            let nc = map.nc;
+            let nb = map.nb;
+            let base_idx : usize = base_idx.into();
+            cg_assert!(base_idx < nb);
+            let to : usize = to.into();
+            cg_assert!(base_idx < nc);
             let idx = |a, b| a * nc + b;
-            self.paths[idx(start, stop)]
+            self.paths[idx(base_idx, to)]
+        }
+
+        fn path_from_base(&self, base_idx : impl Into<usize>, to : impl Into<usize>, map : &Map) -> Path {
+            let nc = map.nc;
+            let nb = map.nb;
+            let base_idx : usize = base_idx.into();
+            cg_assert!(base_idx < nb);
+            let to : usize = to.into();
+            cg_assert!(base_idx < nc);
+            let idx = |a, b| a * nc + b;
+            self.paths_from_bases[idx(base_idx, to)]
         }
 
         // }}}
@@ -2949,6 +3035,8 @@ pub mod main {
             let mut actions = Actions::default();
             let nc = game.map.nc;
 
+            // {{{ build resources (cluster of stuff)
+
             let max_dist = 1;
             // quick & dirty clustering
             let mut resources = game.state.resources.iter()
@@ -2987,19 +3075,26 @@ pub mod main {
                     },
                 }
             }
+            logln!(50, "resources: {}", itertools::join(resources.iter()
+                .map(|x| itertools::join(x.iter(), ","))
+                , " "));
+
+            // }}}
+            // {{{ pair bests with their bases
 
             #[derive(Debug, Copy, Clone, PartialEq, Default)]
             struct Cand {
                 resources_idx: usize,
                 gain: usize,
                 distance: Idx,
+                base_idx: usize,
                 base: Idx,
                 spread: usize, // number of beacon projected, for normalization
                 current: usize, // number of current ants on this target
                 current_on_resource: usize, // number of current ants on this target
             }
 
-            let mut cands = game.map.allied.iter().map(|base|
+            let mut cands = game.map.allied.iter().cloned().enumerate().map(|(base_idx, base)|
                 resources.iter().enumerate().map(move |(idx, r)| Cand {
                     resources_idx: idx,
                     gain: r.iter()
@@ -3010,18 +3105,19 @@ pub mod main {
                             _ => 1,
                         } * game.state.resources[*x])
                         .sum(),
-                    distance: r.iter().map(|x| game.map.distance(*base, *x)).min().unwrap(),
-                    base : *base,
+                    distance: r.iter().map(|x| game.map.distance(base, *x)).min().unwrap(),
+                    base_idx,
+                    base,
                     ..Default::default()
                 }))
                 .flatten()
                 .collect::<Vec<_>>();
             impl Cand {
                 pub fn heuristic(&self) -> f32 {
-                    (self.distance as f32) // closer
+                    self.distance as f32 // closer
                     // - (self.current_on_resource as f32 / 10.) // current ants on resources
                     // - (self.current as f32 / 10.)) // current ants on path
-                    // * (self.gain as f32) // target bigger cluster
+                    // / (self.gain as f32) // target bigger cluster
                 }
             }
             impl PartialOrd for Cand {
@@ -3042,11 +3138,11 @@ pub mod main {
             for cand in cands.iter_mut() {
                 cells.clear();
                 cells.extend(resources[cand.resources_idx].iter());
-                // extend by path with leatest opp?
+                // TODO extend by path with leatest opp?
                 for dst in resources[cand.resources_idx].iter() {
                     // fill potential holes
                     if game.map.distance(cand.base, *dst) == cand.distance {
-                        cells.extend(game.state.path(cand.base, *dst, &game.map)
+                        cells.extend(game.state.path_from_base(cand.base_idx, *dst, &game.map)
                             .iter().map(|x| *x as usize));
                         break;
                     }
@@ -3071,21 +3167,24 @@ pub mod main {
             }
 
             let mut choices = Vec::<Cand>::new();
-            // while choices.iter().map(|x| x.base).unique().count() != game.map.nb {
-            while choices.len() < 4 * game.map.nb {
+            while choices.iter().map(|x| x.base).unique().count() != game.map.nb
+            || choices.len() < match game.map.nb { 1 => 3, 2 => 4, _ => panic!(), } {
                 if cands.len() == 0 { break; }
                 cands.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let (_base, resources_idx) = (cands[0].base, cands[0].resources_idx);
-                choices.push(cands[0]);
+                choices.push(cands.swap_remove(0));
                 // cands.retain(|x| x.base != base);
-                cands.retain(|x| x.resources_idx != resources_idx);
+                // cands.retain(|x| x.resources_idx != resources_idx);
             }
-            // cg_assert_eq!(choice.len(), game.map.nb);
+
+            // }}}
+            // {{{ build final graph of beacons
+
             // beacons
             let spreads : usize = choices.iter().map(|x| x.spread).sum();
             let mut graph = Usizes::with_len(nc);
             for cand in &choices {
-                logln!(1, "base@{}: {:?} ({})", cand.base, cand,
+                logln!(10, "base@{}: {:?} ({})", cand.base, cand,
                     itertools::join(resources[cand.resources_idx].iter(), ","));
                 let power = 1 + spreads - cand.spread;
                 // let power = cand.gain * power;
@@ -3095,9 +3194,9 @@ pub mod main {
                     // fill potential holes
                     if !hole_filled
                     && game.map.distance(cand.base, *dst) == cand.distance {
-                        logln!(1, "adding {}->{}: {}", cand.base, *dst,
-                            itertools::join(game.state.path(cand.base, *dst, &game.map).iter(), ","));
-                        for hole in game.state.path(cand.base, *dst, &game.map).iter().map(|x| *x as usize) {
+                        logln!(10, "adding {}->{}: {}", cand.base, *dst,
+                            itertools::join(game.state.path_from_base(cand.base_idx, *dst, &game.map).iter(), ","));
+                        for hole in game.state.path_from_base(cand.base_idx, *dst, &game.map).iter().map(|x| *x as usize) {
                             graph[hole] = std::cmp::max(graph[hole], power);
                         }
                         hole_filled = true;
@@ -3107,8 +3206,10 @@ pub mod main {
                 // logln!(0, "actions {}", itertools::join(actions.iter(), ","));
             }
 
-            logln!(1, "graph: {}",
-                itertools::join(graph.iter().enumerate().map(|(idx, x)| format!("{}@{}", x, idx)), ","));
+            // }}}
+
+            logln!(10, "graph: {}",
+                itertools::join(graph.iter().enumerate().map(|(idx, x)| format!("{}({})", idx, x)), ","));
             for (idx, power) in graph.iter()
                 .enumerate()
                 .filter(|(_, x)| **x > 0)
@@ -3693,7 +3794,7 @@ pub mod main {
             lines.push(get_stdin_line(dump_line));
             // take the time just after the first parsed line
             let now = Instant::now();
-            for _ in 1..(self.map.nc) {
+            for _ in 1..(1 + self.map.nc) {
                 lines.push(get_stdin_line(dump_line));
             }
 
