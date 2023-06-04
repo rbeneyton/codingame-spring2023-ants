@@ -73,7 +73,7 @@ pub mod main {
     // forest max tree position
     pub const MAP_SIZE: usize = 115; // 9 * 7 + (8+7+6+5) * 2
     pub const MAP_SIZE_2: usize = MAP_SIZE * MAP_SIZE;
-    pub const MAX_PATH: usize = 32;
+    pub const MAX_PATH: usize = 40;
     // max step for neighbors
     pub const MAX_STEP: usize = 4;
     pub const MAX_BASE: usize = 4;
@@ -1066,10 +1066,33 @@ pub mod main {
     }
 
     impl Map {
-        // {{{
+        // {{{ misc
 
         pub fn init(&mut self) {
         }
+
+        pub fn post_init(&mut self) {
+            self.compute_distances_and_path();
+        }
+
+        fn distance(&self, start : impl Into<usize>, stop : impl Into<usize>) -> Idx {
+            let nc = self.nc;
+            let start : usize = start.into();
+            let stop : usize = stop.into();
+            let idx = |a, b| a * nc + b;
+            self.distances[idx(start, stop)]
+        }
+
+        fn path(&self, start : impl Into<usize>, stop : impl Into<usize>) -> Path {
+            let nc = self.nc;
+            let start : usize = start.into();
+            let stop : usize = stop.into();
+            let idx = |a, b| a * nc + b;
+            self.paths[idx(start, stop)]
+        }
+
+        // }}}
+        // {{{ from_string
 
         pub fn from_string(&mut self, lines: &Vec<String>) {
             // {{{ parsing
@@ -1187,21 +1210,7 @@ pub mod main {
             // }}}
         }
 
-        fn distance(&self, start : impl Into<usize>, stop : impl Into<usize>) -> Idx {
-            let nc = self.nc;
-            let start : usize = start.into();
-            let stop : usize = stop.into();
-            let idx = |a, b| a * nc + b;
-            self.distances[idx(start, stop)]
-        }
-
-        fn path(&self, start : impl Into<usize>, stop : impl Into<usize>) -> Path {
-            let nc = self.nc;
-            let start : usize = start.into();
-            let stop : usize = stop.into();
-            let idx = |a, b| a * nc + b;
-            self.paths[idx(start, stop)]
-        }
+        /// }}}
         // {{{ compute_distances
 
         fn compute_distances_and_path(&mut self) {
@@ -1222,7 +1231,7 @@ pub mod main {
                 }
                 cells.clear();
                 cells.insert(start);
-                self.distances[idx(start)] = 0;
+                self.distances[idx(start)] = 0; // default for Distances is also 0
                 loop {
                     next_cells.clear();
                     for i in &cells {
@@ -1254,6 +1263,7 @@ pub mod main {
                     let mut cur = self.distances[iidx];
                     let mut next = stop as Idx;
                     loop {
+                        if self.cells[next.into()].neigh.iter().any(|x| *x == (start as Idx)) { break; }
                         // prioritize path with highest resources (not fully optimal)
                         next = self.cells[next.into()].neigh.iter()
                             .cloned()
@@ -1262,19 +1272,12 @@ pub mod main {
                             .map(|x| (x, self.cells[x as usize].initial_resources))
                             .max_by(|a, b| a.1.cmp(&b.1))
                             .expect("distance inconsistency").0;
-                        if next == start as Idx { break; }
                         self.paths[iidx].append(next);
                         cur -= 1;
                     }
                     logln!(99, "from {} to {}: {}", start, stop, itertools::join(self.paths[iidx].iter(), ","));
                 }
             }
-        }
-
-        // }}}
-
-        pub fn post_init(&mut self) {
-            self.compute_distances_and_path();
         }
 
         // }}}
@@ -1396,6 +1399,8 @@ pub mod main {
         pub turn: Turn, // locally computed
         pub pla: [Player; 2],
         pub resources: Usizes, // resource > 0 only
+        // extra: live paths
+        pub paths : Paths,
     }
 
     // }}}
@@ -1428,6 +1433,9 @@ pub mod main {
                 self.pla[0].ants[idx] = line[1].parse::<usize>().unwrap();
                 self.pla[1].ants[idx] = line[2].parse::<usize>().unwrap();
             }
+
+            self.compute_live_paths(map);
+
             self.turn += 1;
         }
 
@@ -1451,6 +1459,52 @@ pub mod main {
                 self.pla[0].score,
                 self.pla[1].score)
             }
+        }
+
+        // }}}
+        // {{{ compute_live_paths
+
+        fn compute_live_paths(&mut self, map : &Map) {
+            let nc = map.nc;
+            self.paths.set_len(nc * nc);
+            // quick & dirty back prop to get paths
+            for start in 0..nc {
+                let idx = |b| start * nc + b;
+                for stop in (0..nc).filter(|x| *x != start) {
+                    let iidx = idx(stop);
+                    let mut cur = map.distances[iidx];
+                    let mut next = stop as Idx;
+                    self.paths[iidx].set_len(0); // reset previous path
+                    loop {
+                        // exit condition
+                        if map.cells[next.into()].neigh.iter().any(|x| *x == (start as Idx)) { break; }
+                        next = map.cells[next.into()].neigh.iter()
+                            .cloned()
+                            .filter(|x| MCell::valid(*x))
+                            .filter(|x| map.distances[idx(*x as usize)] == cur - 1)
+                            .map(|x| (x, self.resources[x as usize],
+                                self.pla[1].ants[x as usize], self.pla[0].ants[x as usize]))
+                            // prioritize path with highest current resources
+                            // then my own ants
+                            // then lowest opp (not fully optimal)
+                            .max_by(|a, b| a.1.cmp(&b.1)
+                                .then_with(|| a.3.cmp(&b.3))
+                                .then_with(|| b.2.cmp(&a.2)))
+                            .expect("distance inconsistency").0;
+                        self.paths[iidx].append(next);
+                        cur -= 1;
+                    }
+                    logln!(99, "from {} to {}: {}", start, stop, itertools::join(self.paths[iidx].iter(), ","));
+                }
+            }
+        }
+
+        fn path(&self, start : impl Into<usize>, stop : impl Into<usize>, map : &Map) -> Path {
+            let nc = map.nc;
+            let start : usize = start.into();
+            let stop : usize = stop.into();
+            let idx = |a, b| a * nc + b;
+            self.paths[idx(start, stop)]
         }
 
         // }}}
@@ -2964,10 +3018,10 @@ pub mod main {
                 .collect::<Vec<_>>();
             impl Cand {
                 pub fn heuristic(&self) -> f32 {
-                    self.distance as f32 // closer
-                    - (self.current_on_resource as f32 / 10.) // current ants on resources
-                    - (self.current as f32 / 10.) // current ants on path
-                    // - (self.gain as f32 / 10.) // target bigger cluster
+                    (self.distance as f32) // closer
+                    // - (self.current_on_resource as f32 / 10.) // current ants on resources
+                    // - (self.current as f32 / 10.)) // current ants on path
+                    // * (self.gain as f32) // target bigger cluster
                 }
             }
             impl PartialOrd for Cand {
@@ -2988,10 +3042,12 @@ pub mod main {
             for cand in cands.iter_mut() {
                 cells.clear();
                 cells.extend(resources[cand.resources_idx].iter());
+                // extend by path with leatest opp?
                 for dst in resources[cand.resources_idx].iter() {
                     // fill potential holes
                     if game.map.distance(cand.base, *dst) == cand.distance {
-                        cells.extend(game.map.path(cand.base, *dst).iter().map(|x| *x as usize));
+                        cells.extend(game.state.path(cand.base, *dst, &game.map)
+                            .iter().map(|x| *x as usize));
                         break;
                     }
                 }
@@ -3029,9 +3085,9 @@ pub mod main {
             let spreads : usize = choices.iter().map(|x| x.spread).sum();
             let mut graph = Usizes::with_len(nc);
             for cand in &choices {
-                logln!(0, "base@{}: {:?} ({})", cand.base, cand,
+                logln!(1, "base@{}: {:?} ({})", cand.base, cand,
                     itertools::join(resources[cand.resources_idx].iter(), ","));
-                let power = spreads - cand.spread;
+                let power = 1 + spreads - cand.spread;
                 // let power = cand.gain * power;
                 let mut hole_filled = false;
                 for dst in resources[cand.resources_idx].iter() {
@@ -3039,7 +3095,9 @@ pub mod main {
                     // fill potential holes
                     if !hole_filled
                     && game.map.distance(cand.base, *dst) == cand.distance {
-                        for hole in game.map.path(cand.base, *dst).iter().map(|x| *x as usize) {
+                        logln!(1, "adding {}->{}: {}", cand.base, *dst,
+                            itertools::join(game.state.path(cand.base, *dst, &game.map).iter(), ","));
+                        for hole in game.state.path(cand.base, *dst, &game.map).iter().map(|x| *x as usize) {
                             graph[hole] = std::cmp::max(graph[hole], power);
                         }
                         hole_filled = true;
@@ -3049,11 +3107,22 @@ pub mod main {
                 // logln!(0, "actions {}", itertools::join(actions.iter(), ","));
             }
 
+            logln!(1, "graph: {}",
+                itertools::join(graph.iter().enumerate().map(|(idx, x)| format!("{}@{}", x, idx)), ","));
             for (idx, power) in graph.iter()
                 .enumerate()
                 .filter(|(_, x)| **x > 0)
            {
-                actions.append(Action::Beacon(idx as Idx, *power as Score));
+                let mut power = *power as Score;
+                // detect chain brak by opp
+                if game.state.pla[0].ants[idx] > 0
+                && game.state.pla[1].ants[idx] > game.state.pla[0].ants[idx] {
+                    logln!(1, "extra power for {}: {}>{}",
+                        idx, game.state.pla[1].ants[idx], game.state.pla[0].ants[idx]);
+                    power += 3;
+                }
+
+                actions.append(Action::Beacon(idx as Idx, power));
            }
 
             // dbg!(&actions);
